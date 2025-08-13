@@ -1,43 +1,67 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<title>Nearest Washroom / Drinking Fountain</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nearest Amenities</title>
+
+<!-- Leaflet CSS -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
 <style>
-    body { margin:0; padding:0; }
-    #map { height: 100vh; }
-    .controls {
-        position: absolute;
-        top: 10px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: white;
-        padding: 8px;
-        border-radius: 5px;
-        z-index: 1000;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-        font-family: sans-serif;
-    }
-    button { margin-left: 5px; }
+  body, html { margin:0; padding:0; height:100%; }
+  #map { height:100%; }
+  #controls {
+    position: absolute;
+    top: 10px; left: 10px;
+    z-index: 1000;
+    background: rgba(255,255,255,0.9);
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+  #refreshBtn {
+    background: #2196f3;
+    color: white;
+    border: none;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-top: 5px;
+    width: 100%;
+  }
+  label { display: block; margin-top: 5px; }
+  /* Hide routing panel */
+  .leaflet-routing-container {
+    display: none !important;
+  }
 </style>
 </head>
 <body>
-
-<div class="controls">
+<div id="controls">
+  <label>
+    Amenity:
     <select id="amenitySelect">
-        <option value="toilets">🚻 Public Washroom</option>
-        <option value="drinking_water">💧 Drinking Fountain</option>
+      <option value="toilets">Public Washrooms</option>
+      <option value="drinking_water">Drinking Fountains</option>
     </select>
-    <button id="refreshBtn">Refresh</button>
+  </label>
+  <label>
+    Search Radius: <span id="radiusValue">5000</span> m
+    <input type="range" id="radiusSlider" min="500" max="10000" step="500" value="5000">
+  </label>
+  <button id="refreshBtn">🔄 Refresh</button>
 </div>
-
 <div id="map"></div>
 
+<!-- Leaflet JS -->
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js"></script>
+
 <script>
-let map, userMarker, amenityMarkers = [], routeLine;
+let map, userLat, userLon, radiusCircle, routeControl;
+
+// Red icon for user location
 const redIcon = new L.Icon({
     iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
     shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
@@ -47,92 +71,115 @@ const redIcon = new L.Icon({
     shadowSize: [41, 41]
 });
 
-function initMap(lat, lon) {
-    map = L.map('map').setView([lat, lon], 15);
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19
-    }).addTo(map);
-
-    userMarker = L.marker([lat, lon], { icon: redIcon }).addTo(map).bindPopup("📍 You are here");
-    loadAmenities(lat, lon);
+function getDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const dLat = (lat2-lat1) * Math.PI/180;
+    const dLon = (lon2-lon1) * Math.PI/180;
+    const a = Math.sin(dLat/2)**2 +
+              Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
+              Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-function loadAmenities(lat, lon) {
-    // Clear previous markers/route
-    amenityMarkers.forEach(m => map.removeLayer(m));
-    amenityMarkers = [];
-    if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+function initMap() {
+    if (map) {
+        map.remove();
+    }
+    map = L.map('map').setView([0,0], 14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+}
 
-    const amenityType = document.getElementById("amenitySelect").value;
-    const query = `
-        [out:json];
-        node(around:2000,${lat},${lon})[amenity=${amenityType}];
-        out;
-    `;
-    fetch("https://overpass-api.de/api/interpreter", {
-        method: "POST",
-        body: query
-    })
-    .then(res => res.json())
-    .then(data => {
+async function loadAmenities() {
+    const amenity = document.getElementById("amenitySelect").value;
+    const radius = parseInt(document.getElementById("radiusSlider").value);
+
+    if (radiusCircle) {
+        map.removeLayer(radiusCircle);
+    }
+    if (routeControl) {
+        map.removeControl(routeControl);
+    }
+
+    navigator.geolocation.getCurrentPosition(async pos => {
+        userLat = pos.coords.latitude;
+        userLon = pos.coords.longitude;
+
+        initMap();
+
+        L.marker([userLat, userLon], { icon: redIcon })
+            .addTo(map)
+            .bindPopup("📍 You are here");
+
+        // Draw radius circle
+        radiusCircle = L.circle([userLat, userLon], {
+            radius: radius,
+            color: "#2196f3",
+            fillColor: "#2196f3",
+            fillOpacity: 0.1
+        }).addTo(map);
+
+        const query = `
+            [out:json];
+            node["amenity"="${amenity}"](around:${radius},${userLat},${userLon});
+            out;
+        `;
+
+        const response = await fetch("https://overpass-api.de/api/interpreter", {
+            method: "POST",
+            body: query
+        });
+        const data = await response.json();
+
         if (!data.elements.length) {
-            alert("No amenities found nearby.");
+            alert(`No ${amenity.replace("_", " ")} found within ${radius}m.`);
             return;
         }
-        let nearest = null, nearestDist = Infinity;
-        data.elements.forEach(el => {
-            const dist = map.distance([lat, lon], [el.lat, el.lon]);
-            if (dist < nearestDist) {
-                nearestDist = dist;
-                nearest = el;
-            }
-            const marker = L.marker([el.lat, el.lon]).addTo(map);
-            marker.bindPopup(`${amenityType === 'toilets' ? '🚻 Public Washroom' : '💧 Drinking Fountain'}`);
-            amenityMarkers.push(marker);
+
+        const nearest = data.elements
+            .map(w => ({
+                lat: w.lat,
+                lon: w.lon,
+                distance: getDistance(userLat, userLon, w.lat, w.lon)
+            }))
+            .sort((a, b) => a.distance - b.distance)[0];
+
+        data.elements.forEach(w => {
+            L.marker([w.lat, w.lon])
+                .addTo(map)
+                .bindPopup(`${amenity.replace("_"," ")}<br>${getDistance(userLat, userLon, w.lat, w.lon).toFixed(2)} km away`);
         });
-        if (nearest) {
-            drawPath(lat, lon, nearest.lat, nearest.lon);
-        }
-    })
-    .catch(err => console.error(err));
-}
 
-function drawPath(startLat, startLon, endLat, endLon) {
-    const url = `https://router.project-osrm.org/route/v1/walking/${startLon},${startLat};${endLon},${endLat}?overview=full&geometries=geojson`;
-    fetch(url)
-        .then(res => res.json())
-        .then(data => {
-            const coords = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
-            routeLine = L.polyline(coords, { color: 'blue', weight: 4 }).addTo(map);
-            map.fitBounds(routeLine.getBounds(), { padding: [50, 50] });
-        })
-        .catch(err => console.error(err));
-}
+        // Draw walking route without showing instructions
+        routeControl = L.Routing.control({
+            waypoints: [
+                L.latLng(userLat, userLon),
+                L.latLng(nearest.lat, nearest.lon)
+            ],
+            routeWhileDragging: false,
+            show: false,
+            addWaypoints: false,
+            draggableWaypoints: false,
+            createMarker: () => null
+        }).addTo(map);
 
-// Geolocation and initialization
-function locateAndInit() {
-    navigator.geolocation.getCurrentPosition(pos => {
-        const lat = pos.coords.latitude;
-        const lon = pos.coords.longitude;
-        if (!map) {
-            initMap(lat, lon);
-        } else {
-            map.setView([lat, lon], 15);
-            userMarker.setLatLng([lat, lon]);
-            loadAmenities(lat, lon);
-        }
-    }, () => {
-        alert("Could not get your location.");
+    }, err => {
+        alert("Unable to get your location.");
     });
 }
 
-document.getElementById("refreshBtn").addEventListener("click", locateAndInit);
-document.getElementById("amenitySelect").addEventListener("change", locateAndInit);
+// Refresh button
+document.getElementById("refreshBtn").addEventListener("click", loadAmenities);
 
-// Start the app
-locateAndInit();
+// Auto refresh when changing amenity type or radius
+document.getElementById("amenitySelect").addEventListener("change", loadAmenities);
+document.getElementById("radiusSlider").addEventListener("input", e => {
+    document.getElementById("radiusValue").textContent = e.target.value;
+    loadAmenities();
+});
+
+loadAmenities();
 </script>
-
 </body>
 </html>
